@@ -1,0 +1,174 @@
+---
+title: "Intro to Text Analysis in R - SIPS 2020"
+author: "Nina Wang"
+date: "17/06/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Intro
+
+In this tutorial, we'll go through a simple text analysis pipeline and cover sentiment analysis using word counting approach, as well as a topic modelling example.
+
+First, let's load in the packages we'll be using:
+
+```{r packages}
+library(tidyverse)
+library(stm)
+library(tidytext)
+```
+
+The corpus we'll be using in this tutorial is a set of political blog posts from 2008 collected by Eisenstein & Xing (2010). There are around 13,000 posts from 6 different blogs across the political spectrum. You can read more [here](http://reports-archive.adm.cs.cmu.edu/anon/ml2010/CMU-ML-10-101.pdf). 
+
+```{r data, echo=TRUE}
+poliblogs <- read.csv("poliblogs.csv")
+poliblogs$documents <- as.character(poliblogs$documents)
+```
+
+
+## Word counting
+We'll start by running a simple sentiment analysis. We're using a word counting approach here, using the **tidytext** package. If you're familiar with the tidyverse (ggplot2, dplyr, etc.) this package will probably be fairly intuitive for you, as it relies on a similar logic and toolset but is adapted for text data. The online book [Text Mining with R](https://www.tidytextmining.com) is a great intro if you're interested in learning more.
+
+The "tidy text" format represents text in the form of 1 token per row. This token can be a single word, n-gram (sequence of *n* words), or sentence.
+
+```{r tidytext}
+tidy_poliblogs <- poliblogs %>%
+  unnest_tokens(word, documents)
+
+head(tidy_poliblogs)
+```
+
+We'll then remove stop words: words like "the", "and", "of", and "to" that occur frequently and are not useful for our analysis.
+
+```{r stopwords}
+data(stop_words)
+
+tidy_poliblogs <- tidy_poliblogs %>%
+  anti_join(stop_words)
+```
+
+We can take a look at some of the most common words in this dataset. Here, we're plotting words that occur over 5,000 times.
+
+```{r freq}
+tidy_poliblogs %>%
+  count(word, sort = TRUE) %>%
+  filter(n > 5000) %>%
+  ggplot(aes(word, n)) +
+  geom_col() +
+  coord_flip()
+```
+
+# Sentiment analysis
+
+There are a couple of sentiment lexicons available in tidytext. Here, we'll use the AFINN lexicon, which assigns words a score between -5 and 5, with negative scores indicating negative sentiment and positive scores indicating positive sentiment.
+
+```{r sentiment dict}
+get_sentiments("afinn")
+```
+
+Let's calculate sentiment scores by blog post. In tidytext, this works by *joining* the sentiment dictionary with the data (in tidy text format) and then counting and summarizing using other tidyverse functions.
+
+```{r sentiment}
+
+afinn <- get_sentiments("afinn")
+
+poliblogs_sentiment <- tidy_poliblogs %>%
+  inner_join(afinn) %>%
+  group_by(id) %>%
+  summarise(sentiment = sum(value))
+
+head(poliblogs_sentiment)
+```
+
+Now we have a sentiment score for each document. Let's plot these:
+
+```{r plot 1}
+ggplot(poliblogs_sentiment[1:200,], aes(id, sentiment)) +
+  geom_col(fill = "midnightblue")
+```
+
+This isn't particularly informative. Instead, we might want to look at differences across time and across political parties - we'll use *group_by* to get a sentiment score for each day across each political party.
+
+```{r sentiment by party}
+poliblogs_sentiment_party <- tidy_poliblogs %>%
+  inner_join(afinn) %>%
+  group_by(rating, day) %>%
+  summarise(sentiment = sum(value))
+
+head(poliblogs_sentiment_party)
+```
+
+Let's plot this:
+
+```{r plot 2}
+
+ggplot(subset(poliblogs_sentiment_party, day %in% (1:50)), aes(day, sentiment)) +
+  geom_line(aes(colour = rating), size = 0.5) +
+  geom_point(aes(colour = rating), size = 1)
+
+```
+
+This is a little more informative. We can see that there are fluctuations in sentiment over time, and that these differ depending on the ideological leanings of the blog. But we don't really know what topics are being discussed in these blog posts - yet!
+
+Before we get there: a quick note on word counting. Below, we're using a different sentiment dictionary (nrc) and filtering out just the negative terms. Then, we're looking at the top negative words that are in our corpus.
+
+```{r nrc negative sentiment}
+nrc_neg <- get_sentiments("nrc") %>% filter(sentiment == "negative")
+
+tidy_poliblogs %>%
+  inner_join(nrc_neg) %>%
+  count(word, sort = TRUE)
+```
+
+Some of these make sense: "war", "tax", "bad", etc. But others are not so straightforward - e.g. what is "john" referring to? Or "government"? Are these necessarily being used in a negative way?
+
+## Topic modelling
+We might also be interested in the topics that are being discussed in these blog posts.
+
+### Preprocessing
+
+Before we can run our topic model, we have to do a little preprocessing on our text. (See slides for more info on some of the preprocessing steps being applied here, many of which are common to many language analysis methods.)
+
+```{r preprocessing}
+processed <- textProcessor(poliblogs$documents, metadata = poliblogs)
+out <- prepDocuments(processed$documents, processed$vocab, processed$meta)
+docs <- out$documents
+vocab <- out$vocab
+meta <- out$meta
+```
+
+### Topic models
+
+We're ready to fit our model now. We're setting K (the number of topics) to 20. Generally, you would want to run models with different K values and evaluate them to see which is the best fit.
+
+```{r party model}
+poliblogPrev <- stm(documents = out$documents, vocab = out$vocab,
+                    K = 20, prevalence =~ rating + s(day), data = out$meta, init.type = "Spectral")
+```
+
+Let's take a look at this model. One thing we can do is inspect the most representative words for each topic. Note some will be "stemmed".
+
+```{r top words}
+labelTopics(poliblogPrev)
+```
+
+We can also look at the documents that loaded most highly on each topic to get a better understanding of what that topic represents.
+
+```{r top docs}
+
+findThoughts(poliblogPrev, texts = poliblogs$documents, topics = 11, n = 2)
+
+```
+
+We can also plot the frequency of each topic.
+
+```{r freq plot}
+
+plot(poliblogPrev, type = "summary")
+
+```
+
+We won't cover this in this tutorial, but you could also link your sentiment scores to these topics - e.g., do Liberal and Conservative blogs discuss certain topics with different levels of negative/positive sentiment or different kinds of emotional language.
